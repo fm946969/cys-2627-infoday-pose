@@ -1,9 +1,11 @@
 """Application orchestrator for the CYS AI Pose Controller."""
 
 from contextlib import ExitStack
+from dataclasses import replace
 
 import cv2
 import numpy as np
+from serial.tools import list_ports
 
 from .commands import CommandClassifier, ControlCommand
 from .config import ControllerConfig, FrameArray
@@ -67,5 +69,33 @@ class PoseControllerApp:
 
 def main(config: ControllerConfig | None = None) -> None:
     """Run the AI Pose Controller application."""
+    if config is None:
+        config = _select_serial_port(ControllerConfig())
     app = PoseControllerApp(config=config)
     app.run()
+
+
+def _select_serial_port(config: ControllerConfig) -> ControllerConfig:
+    """Prompt the user to select an available serial device."""
+    ports = sorted(list_ports.comports(), key=lambda port: port.device)
+    if not ports:
+        print("⚠️ No serial devices found. Continuing in No-Hardware Test Mode.")
+        return config
+
+    print("\nAvailable serial devices:")
+    for index, port in enumerate(ports, start=1):
+        print(f"  {index}. {port.device} - {port.description}")
+
+    while True:
+        choice = input(f"Select a COM port [1-{len(ports)}]: ")
+        try:
+            selected_index = int(choice) - 1
+        except ValueError:
+            selected_index = -1
+
+        if 0 <= selected_index < len(ports):
+            selected_port = ports[selected_index].device
+            print(f"Selected serial port: {selected_port}")
+            return replace(config, serial_port=selected_port)
+
+        print(f"Please enter a number from 1 to {len(ports)}.")
