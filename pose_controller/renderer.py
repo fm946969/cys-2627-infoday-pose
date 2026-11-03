@@ -111,14 +111,61 @@ class HudRenderer:
             2,
         )
 
+    def draw_operation_hints(
+        self,
+        frame: FrameArray,
+        camera_index: int,
+        capture_mode: str,
+    ) -> None:
+        """Draw compact camera and keyboard hints at the bottom-left."""
+        height, width = frame.shape[:2]
+        status = f"Camera {camera_index} | {capture_mode}"
+        hints = "C: next camera  M: mode  Q: quit"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.4
+        status_size = cv2.getTextSize(status, font, scale, 1)[0]
+        hints_size = cv2.getTextSize(hints, font, scale, 1)[0]
+        panel_width = min(max(status_size[0], hints_size[0]) + 16, width - 20)
+        panel_height = 42
+        left = 10
+        top = height - panel_height - 10
+        cv2.rectangle(
+            frame,
+            (left, top),
+            (left + panel_width, top + panel_height),
+            BLACK_COLOR,
+            -1,
+        )
+        cv2.putText(
+            frame,
+            status,
+            (left + 8, top + 16),
+            font,
+            scale,
+            YELLOW_COLOR,
+            1,
+        )
+        cv2.putText(
+            frame,
+            hints,
+            (left + 8, top + 34),
+            font,
+            scale,
+            GREEN_COLOR,
+            1,
+        )
+
     def render_frame(
         self,
         frame: FrameArray,
         landmarks: Sequence[Any] | None,
         command: ControlCommand,
+        camera_index: int = 0,
+        capture_mode: str = "Auto",
     ) -> None:
-        """Render skeleton landmarks (if present), logo, and HUD onto the frame."""
+        """Render pose, logo, command HUD, and compact operation hints."""
         if landmarks is not None:
             self.draw_landmarks(frame, landmarks)
         self.overlay_logo(frame)
         self.draw_hud(frame, command)
+        self.draw_operation_hints(frame, camera_index, capture_mode)
