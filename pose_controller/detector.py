@@ -24,7 +24,7 @@ class PoseDetector:
 
     def ensure_model(self) -> Path:
         """Ensure the PoseLandmarker .task model file exists locally."""
-        model_path = self._config.model_path
+        model_path = self._config.resolve_model_path()
         if model_path.is_file():
             return model_path
 

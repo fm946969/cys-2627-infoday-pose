@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Final
 
 import numpy as np
@@ -54,3 +55,10 @@ class ControllerConfig:
         if fallback.is_file():
             return fallback
         return self.logo_path
+
+    def resolve_model_path(self) -> Path:
+        """Resolve the bundled model when running from a PyInstaller package."""
+        if getattr(sys, "frozen", False):
+            bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+            return bundle_root / self.model_path
+        return self.model_path
