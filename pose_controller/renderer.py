@@ -108,7 +108,7 @@ class HudRenderer:
         if x2 <= x1 or y2 <= y1:
             return
 
-        alpha = max(0.0, min(1.0, 1.0 - transparency))
+        alpha = max(0.0, min(1.0, transparency))
         roi = frame[y1:y2, x1:x2]
         overlay = np.full_like(roi, color, dtype=np.uint8)
         cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0.0, dst=roi)
