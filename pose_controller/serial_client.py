@@ -28,6 +28,11 @@ class SerialCommunicator:
 
     def connect(self) -> None:
         """Open the micro:bit USB serial port or fall back to No-Hardware Test Mode."""
+        if not self._config.serial_port:
+            print("⚠️ No serial port selected. Running in 'No-Hardware Test Mode'.")
+            self._serial = None
+            return
+
         try:
             self._serial = serial.Serial(
                 self._config.serial_port,
@@ -63,7 +68,7 @@ class SerialCommunicator:
 
     def _maintain_connection(self, now: float) -> None:
         """Check the selected port and reconnect no more than once per second."""
-        if now < self._next_port_scan_at:
+        if not self._config.serial_port or now < self._next_port_scan_at:
             return
         self._next_port_scan_at = now + 1.0
         port_available = any(

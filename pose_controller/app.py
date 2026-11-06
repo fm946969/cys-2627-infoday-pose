@@ -2,13 +2,15 @@
 
 from contextlib import ExitStack
 from dataclasses import replace
+from typing import Any
 
 import cv2
 import numpy as np
 from serial.tools import list_ports
+from serial.tools.list_ports_common import ListPortInfo
 
 from .commands import CommandClassifier, ControlCommand
-from .config import ControllerConfig, FrameArray
+from .config import BLACK_COLOR, GREEN_COLOR, YELLOW_COLOR, ControllerConfig, FrameArray
 from .detector import PoseDetector
 from .renderer import HudRenderer
 from .serial_client import SerialCommunicator
@@ -20,6 +22,13 @@ CAPTURE_MODES: tuple[tuple[str, int | None, int | None, float | None], ...] = (
     ("HD 1280x720 @30", 1280, 720, 30.0),
     ("Full HD 1920x1080 @30", 1920, 1080, 30.0),
 )
+SELECTOR_WIDTH = 800
+SELECTOR_HEIGHT = 520
+MAX_VISIBLE_PORTS = 6
+UP_KEY_CODES = {2490368, 65362, 63232}
+DOWN_KEY_CODES = {2621440, 65364, 63233}
+ENTER_KEY_CODES = {13, 10, 32}
+ESC_KEY_CODE = 27
 
 
 class PoseControllerApp:
@@ -141,34 +150,320 @@ def main(config: ControllerConfig | None = None) -> None:
     """Run the AI Pose Controller application."""
     if config is None:
         config = _select_serial_port(ControllerConfig())
+        if config is None:
+            return
     app = PoseControllerApp(config=config)
     app.run()
 
 
-def _select_serial_port(config: ControllerConfig) -> ControllerConfig:
-    """Prompt the user to select an available serial device."""
+def _list_serial_ports() -> list[ListPortInfo]:
+    """Return available COM port devices sorted by device name."""
     ports = sorted(list_ports.comports(), key=lambda port: port.device)
-    if not ports:
-        print("⚠️ No serial devices found. Continuing in No-Hardware Test Mode.")
-        return config
+    if ports:
+        print("\nAvailable serial devices:")
+        for index, port in enumerate(ports, start=1):
+            print(f"  {index}. {_format_port_label(port)}")
+    else:
+        print("\n⚠️ No serial devices found.")
+    return ports
 
-    print("\nAvailable serial devices:")
-    for index, port in enumerate(ports, start=1):
-        print(f"  {index}. {port.device} - {port.description}")
+
+def _format_port_label(port: ListPortInfo) -> str:
+    """Format a COM port entry with device name and human-readable description."""
+    description = (port.description or "").strip()
+    if description and description != port.device:
+        label = f"{port.device} - {description}"
+    else:
+        label = port.device
+    manufacturer = (port.manufacturer or "").strip()
+    if manufacturer and manufacturer.lower() not in label.lower():
+        label = f"{label} ({manufacturer})"
+    return label
+
+
+def _default_port_selection(ports: list[ListPortInfo], default_port: str) -> int:
+    """Determine the initial highlighted option index."""
+    for index, port in enumerate(ports):
+        if port.device.upper() == default_port.upper():
+            return index
+    return 0
+
+
+def _select_serial_port(config: ControllerConfig) -> ControllerConfig | None:
+    """Display an OpenCV startup screen to let the user select a COM port device."""
+    ports = _list_serial_ports()
+    selected_index = _default_port_selection(ports, config.serial_port)
+
+    row_bounds: list[tuple[int, int, int, int, int]] = []
+    button_bounds: dict[str, tuple[int, int, int, int]] = {}
+    mouse_action: dict[str, str | None] = {"trigger": None}
+
+    def _on_mouse(event: int, x: int, y: int, _flags: int, _param: Any) -> None:
+        nonlocal selected_index
+        if event == cv2.EVENT_MOUSEMOVE:
+            for option_idx, left, top, right, bottom in row_bounds:
+                if left <= x <= right and top <= y <= bottom:
+                    selected_index = option_idx
+                    break
+        elif event == cv2.EVENT_LBUTTONDOWN:
+            for option_idx, left, top, right, bottom in row_bounds:
+                if left <= x <= right and top <= y <= bottom:
+                    selected_index = option_idx
+                    mouse_action["trigger"] = "confirm"
+                    return
+            for name, (left, top, right, bottom) in button_bounds.items():
+                if left <= x <= right and top <= y <= bottom:
+                    mouse_action["trigger"] = name
+                    return
+
+    try:
+        cv2.namedWindow(config.window_title, cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback(config.window_title, _on_mouse)
+    except cv2.error:
+        return _select_serial_port_console(config, ports)
 
     while True:
-        choice = input(f"Select a COM port [1-{len(ports)}]: ")
-        try:
-            selected_index = int(choice) - 1
-        except ValueError:
-            selected_index = -1
+        option_count = len(ports) + 1  # ports + No-Hardware Test Mode
+        selected_index = max(0, min(selected_index, option_count - 1))
 
-        if 0 <= selected_index < len(ports):
-            selected_port = ports[selected_index].device
+        frame, row_bounds, button_bounds = _render_port_selector_frame(
+            ports, selected_index
+        )
+        cv2.imshow(config.window_title, frame)
+
+        raw_key = cv2.waitKeyEx(30)
+        try:
+            if cv2.getWindowProperty(config.window_title, cv2.WND_PROP_VISIBLE) < 1:
+                cv2.destroyAllWindows()
+                return None
+        except cv2.error:
+            return None
+
+        action = mouse_action["trigger"]
+        mouse_action["trigger"] = None
+
+        if raw_key in UP_KEY_CODES:
+            selected_index = (selected_index - 1) % option_count
+            continue
+        if raw_key in DOWN_KEY_CODES:
+            selected_index = (selected_index + 1) % option_count
+            continue
+
+        key = raw_key & 0xFF if 0 <= raw_key < 256 else -1
+        if key in (ord("w"), ord("W")):
+            selected_index = (selected_index - 1) % option_count
+            continue
+        if key in (ord("s"), ord("S")):
+            selected_index = (selected_index + 1) % option_count
+            continue
+        if key == ESC_KEY_CODE or key in (ord("q"), ord("Q")) or action == "quit":
+            cv2.destroyAllWindows()
+            return None
+        if key in (ord("r"), ord("R")) or action == "refresh":
+            ports = _list_serial_ports()
+            selected_index = _default_port_selection(ports, config.serial_port)
+            continue
+        if key in (ord("0"), ord("n"), ord("N")):
+            selected_index = len(ports)
+            action = "confirm"
+        elif ord("1") <= key <= ord("9"):
+            number_index = key - ord("1")
+            if number_index < len(ports):
+                selected_index = number_index
+                action = "confirm"
+        elif key in ENTER_KEY_CODES:
+            action = "confirm"
+
+        if action == "confirm":
+            try:
+                cv2.setMouseCallback(config.window_title, lambda *_args: None)
+            except cv2.error:
+                pass
+            if selected_index < len(ports):
+                selected_port = ports[selected_index].device
+                print(f"Selected serial port: {selected_port}")
+                return replace(config, serial_port=selected_port)
+            print("Selected: No-Hardware Test Mode")
+            return replace(config, serial_port="")
+
+
+def _render_port_selector_frame(
+    ports: list[ListPortInfo],
+    selected_index: int,
+) -> tuple[
+    FrameArray,
+    list[tuple[int, int, int, int, int]],
+    dict[str, tuple[int, int, int, int]],
+]:
+    """Render the OpenCV COM port selection screen and interactive hitboxes."""
+    frame: FrameArray = np.full(
+        (SELECTOR_HEIGHT, SELECTOR_WIDTH, 3), 24, dtype=np.uint8
+    )
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    # Header bar
+    cv2.rectangle(frame, (0, 0), (SELECTOR_WIDTH, 88), BLACK_COLOR, -1)
+    cv2.putText(
+        frame,
+        "Select Serial (COM) Device",
+        (28, 42),
+        font,
+        0.9,
+        YELLOW_COLOR,
+        2,
+    )
+    cv2.putText(
+        frame,
+        "Click a device or use Up/Down + Enter  |  1-9: Select  |  R: Refresh  |  Q: Quit",
+        (28, 72),
+        font,
+        0.45,
+        GREEN_COLOR,
+        1,
+    )
+
+    row_bounds: list[tuple[int, int, int, int, int]] = []
+    left = 28
+    right = SELECTOR_WIDTH - 28
+    row_top = 108
+    row_height = 46
+    row_gap = 8
+
+    if not ports:
+        cv2.rectangle(frame, (left, row_top), (right, row_top + 56), (40, 40, 40), -1)
+        cv2.putText(
+            frame,
+            "No COM port devices detected. Connect micro:bit and press R to refresh.",
+            (left + 16, row_top + 34),
+            font,
+            0.52,
+            YELLOW_COLOR,
+            1,
+        )
+        row_top += 72
+    else:
+        start_idx = 0
+        if len(ports) > MAX_VISIBLE_PORTS and selected_index < len(ports):
+            start_idx = min(
+                max(0, selected_index - MAX_VISIBLE_PORTS // 2),
+                len(ports) - MAX_VISIBLE_PORTS,
+            )
+        visible_ports = ports[start_idx : start_idx + MAX_VISIBLE_PORTS]
+
+        for offset, port in enumerate(visible_ports):
+            option_idx = start_idx + offset
+            top = row_top + offset * (row_height + row_gap)
+            bottom = top + row_height
+            is_selected = option_idx == selected_index
+
+            bg_color = (45, 95, 45) if is_selected else (42, 42, 42)
+            border_color = GREEN_COLOR if is_selected else (85, 85, 85)
+            cv2.rectangle(frame, (left, top), (right, bottom), bg_color, -1)
+            cv2.rectangle(frame, (left, top), (right, bottom), border_color, 2 if is_selected else 1)
+
+            label = _truncate_text(f"{option_idx + 1}. {_format_port_label(port)}", 72)
+            cv2.putText(
+                frame,
+                label,
+                (left + 16, top + 30),
+                font,
+                0.58,
+                YELLOW_COLOR if is_selected else (235, 235, 235),
+                2 if is_selected else 1,
+            )
+            row_bounds.append((option_idx, left, top, right, bottom))
+
+        row_top += len(visible_ports) * (row_height + row_gap) + 6
+
+    # No-Hardware Test Mode option
+    no_hw_idx = len(ports)
+    no_hw_top = min(row_top, SELECTOR_HEIGHT - 125)
+    no_hw_bottom = no_hw_top + row_height
+    is_no_hw_selected = selected_index == no_hw_idx
+    cv2.rectangle(
+        frame,
+        (left, no_hw_top),
+        (right, no_hw_bottom),
+        (45, 95, 45) if is_no_hw_selected else (38, 38, 38),
+        -1,
+    )
+    cv2.rectangle(
+        frame,
+        (left, no_hw_top),
+        (right, no_hw_bottom),
+        GREEN_COLOR if is_no_hw_selected else (85, 85, 85),
+        2 if is_no_hw_selected else 1,
+    )
+    cv2.putText(
+        frame,
+        "0 / N. No-Hardware Test Mode (Continue without COM device)",
+        (left + 16, no_hw_top + 30),
+        font,
+        0.55,
+        YELLOW_COLOR if is_no_hw_selected else (210, 210, 210),
+        2 if is_no_hw_selected else 1,
+    )
+    row_bounds.append((no_hw_idx, left, no_hw_top, right, no_hw_bottom))
+
+    # Footer buttons
+    button_bounds: dict[str, tuple[int, int, int, int]] = {}
+    btn_top = SELECTOR_HEIGHT - 60
+    btn_bottom = SELECTOR_HEIGHT - 18
+    buttons = (
+        ("confirm", "[Enter] Start", left, left + 220, GREEN_COLOR),
+        ("refresh", "[R] Refresh Devices", left + 240, left + 490, YELLOW_COLOR),
+        ("quit", "[Q] Quit", left + 510, right, (180, 180, 180)),
+    )
+    for name, text, b_left, b_right, color in buttons:
+        cv2.rectangle(frame, (b_left, btn_top), (b_right, btn_bottom), BLACK_COLOR, -1)
+        cv2.rectangle(frame, (b_left, btn_top), (b_right, btn_bottom), color, 1)
+        cv2.putText(
+            frame,
+            text,
+            (b_left + 18, btn_top + 27),
+            font,
+            0.52,
+            color,
+            1,
+        )
+        button_bounds[name] = (b_left, btn_top, b_right, btn_bottom)
+
+    return frame, row_bounds, button_bounds
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    """Truncate long device descriptions to fit inside the selector row."""
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 3]}..."
+
+
+def _select_serial_port_console(
+    config: ControllerConfig,
+    ports: list[ListPortInfo],
+) -> ControllerConfig:
+    """Fallback console prompt when an OpenCV GUI window cannot be created."""
+    if not ports:
+        print("⚠️ No serial devices found. Continuing in No-Hardware Test Mode.")
+        return replace(config, serial_port="")
+
+    print("  0. No-Hardware Test Mode")
+    while True:
+        choice = input(f"Select a COM port [1-{len(ports)}, or 0 for test mode]: ")
+        try:
+            selected_number = int(choice)
+        except ValueError:
+            selected_number = -1
+
+        if selected_number == 0:
+            print("Selected: No-Hardware Test Mode")
+            return replace(config, serial_port="")
+        if 1 <= selected_number <= len(ports):
+            selected_port = ports[selected_number - 1].device
             print(f"Selected serial port: {selected_port}")
             return replace(config, serial_port=selected_port)
 
-        print(f"Please enter a number from 1 to {len(ports)}.")
+        print(f"Please enter a number from 0 to {len(ports)}.")
 
 
 def _find_available_cameras() -> list[int]:
