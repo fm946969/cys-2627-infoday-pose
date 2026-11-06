@@ -62,14 +62,15 @@ class CommandClassifier:
         left_elbow = landmarks[PoseLandmark.LEFT_ELBOW]
         right_elbow = landmarks[PoseLandmark.RIGHT_ELBOW]
 
-        left_hand_down = left_wrist.y - left_shoulder.y > 0.8 * (left_hip.y - left_shoulder.y)
-        right_hand_down = right_wrist.y - right_shoulder.y > 0.8 * (right_hip.y - right_shoulder.y)
+        left_angle = _calculate_angle(left_elbow, left_shoulder, left_hip)
+        right_angle = _calculate_angle(right_elbow, right_shoulder, right_hip)
+
+        left_hand_down = left_angle < 45 and left_wrist.y > 0.85 * left_hip.y + 0.15 * left_shoulder.y
+        right_hand_down = right_angle < 45 and right_wrist.y > 0.85 * right_hip.y + 0.15 * right_shoulder.y
 
         left_hand_up = left_wrist.y < left_eye.y
         right_hand_up = right_wrist.y < right_eye.y
 
-        left_angle = _calculate_angle(left_elbow, left_shoulder, left_hip)
-        right_angle = _calculate_angle(right_elbow, right_shoulder, right_hip)
 
         print(f"{left_angle=}, {right_angle=}")
         left_hand_extended = 45 < left_angle < 135
