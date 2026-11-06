@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any
+import math
 
 from mediapipe.tasks.python import vision
 
@@ -33,6 +34,15 @@ class ControlCommand(StrEnum):
                 return "STOP (🛑)"
 
 
+def _calculate_angle(point_a: Any, vertex: Any, point_b: Any) -> float:
+    """Return the angle in degrees (0.0-180.0) at `vertex` formed by `point_a` and `point_b`."""
+    radians = math.atan2(point_b.y - vertex.y, point_b.x - vertex.x) - math.atan2(
+        point_a.y - vertex.y, point_a.x - vertex.x
+    )
+    angle = abs(math.degrees(radians))
+    return 360.0 - angle if angle > 180.0 else angle
+
+
 class CommandClassifier:
     """Classifies MediaPipe pose landmarks into Maqueen Plus V2 commands."""
 
@@ -47,21 +57,34 @@ class CommandClassifier:
         right_shoulder = landmarks[PoseLandmark.RIGHT_SHOULDER]
         left_hip = landmarks[PoseLandmark.LEFT_HIP]
         right_hip = landmarks[PoseLandmark.RIGHT_HIP]
+        left_eye = landmarks[PoseLandmark.LEFT_EYE]
+        right_eye = landmarks[PoseLandmark.RIGHT_EYE]
+        left_elbow = landmarks[PoseLandmark.LEFT_ELBOW]
+        right_elbow = landmarks[PoseLandmark.RIGHT_ELBOW]
 
-        if left_wrist.y < left_shoulder.y and right_wrist.y < right_shoulder.y:
+        left_hand_down = left_wrist.y - left_shoulder.y > 0.8 * (left_hip.y - left_shoulder.y)
+        right_hand_down = right_wrist.y - right_shoulder.y > 0.8 * (right_hip.y - right_shoulder.y)
+
+        left_hand_up = left_wrist.y < left_eye.y
+        right_hand_up = right_wrist.y < right_eye.y
+
+        left_angle = _calculate_angle(left_elbow, left_shoulder, left_hip)
+        right_angle = _calculate_angle(right_elbow, right_shoulder, right_hip)
+
+        print(f"{left_angle=}, {right_angle=}")
+        left_hand_extended = 45 < left_angle < 135
+        right_hand_extended = 45 < right_angle < 135
+
+        if left_hand_up and right_hand_up:
             return ControlCommand.FORWARD
-        if left_wrist.y > left_hip.y and right_wrist.y > right_hip.y:
+        if left_hand_down and right_hand_down:
             return ControlCommand.BACKWARD
         if (
-            abs(right_wrist.x - right_shoulder.x) > self.turn_x_threshold
-            and right_wrist.y < right_hip.y
-            and left_wrist.y > left_shoulder.y
-        ):
-            return ControlCommand.LEFT
-        if (
-            abs(left_wrist.x - left_shoulder.x) > self.turn_x_threshold
-            and left_wrist.y < left_hip.y
-            and right_wrist.y > right_shoulder.y
+                135 > left_angle > 30 and right_angle < 45
         ):
             return ControlCommand.RIGHT
+        if (
+                135 > right_angle > 30 and left_angle < 45
+        ):
+            return ControlCommand.LEFT
         return ControlCommand.STOP
