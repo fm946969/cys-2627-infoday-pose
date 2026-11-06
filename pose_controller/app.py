@@ -15,15 +15,9 @@ from .detector import PoseDetector
 from .renderer import HudRenderer
 from .serial_client import SerialCommunicator
 
-type CaptureMode = tuple[str, int | None, int | None, float | None]
-
 CAMERA_INDEX_LIMIT = 10
-CAPTURE_MODES: tuple[CaptureMode, ...] = (
-    ("Auto", None, None, None),
-    ("VGA 640x480 @30", 640, 480, 30.0),
-    ("HD 1280x720 @30", 1280, 720, 30.0),
-    ("Full HD 1920x1080 @30", 1920, 1080, 30.0),
-)
+CAPTURE_WIDTH = 1280
+CAPTURE_HEIGHT = 720
 SELECTOR_WIDTH = 800
 SELECTOR_HEIGHT = 520
 MAX_VISIBLE_PORTS = 6
@@ -65,42 +59,23 @@ class PoseControllerApp:
             stack.callback(lambda: cap.release())
             stack.callback(cv2.destroyAllWindows)
             cv2.namedWindow(self.config.window_title, cv2.WINDOW_NORMAL)
-            original_capture_properties = _get_capture_properties(cap)
-            cap, available_modes = _discover_capture_modes(
-                cap, camera_index, original_capture_properties
-            )
-            capture_mode_index = 0
+            _configure_capture_resolution(cap, camera_index)
+            resolution_pending = True
 
             print(
                 "\n🚀 AI Pose Control System Activated! Please stand in front of the camera."
             )
-            print(
-                f"💡 Use C to change camera, 1-{len(available_modes)} or M to select capture mode, and Q to quit."
-            )
+            print("💡 Use C to change camera and Q to quit.")
 
             while cap.isOpened():
                 ret, raw_frame = _safe_read_frame(cap)
                 if not ret or raw_frame is None:
-                    if capture_mode_index != 0:
-                        failed_mode = available_modes[capture_mode_index]
-                        print(
-                            f"⚠️ Camera error in mode '{failed_mode[0]}'; "
-                            "reverting to Auto."
-                        )
-                        if len(available_modes) > 1:
-                            available_modes.pop(capture_mode_index)
-                        cap, restored = _switch_capture_mode(
-                            cap,
-                            camera_index,
-                            available_modes[0],
-                            original_capture_properties,
-                        )
-                        capture_mode_index = 0
-                        if restored:
-                            ret, raw_frame = _safe_read_frame(cap)
-                    if not ret or raw_frame is None:
-                        print("⚠️ Failed to grab frame from camera.")
-                        break
+                    print("⚠️ Failed to grab frame from camera.")
+                    break
+
+                if resolution_pending:
+                    _report_capture_resolution(raw_frame, camera_index)
+                    resolution_pending = False
 
                 frame: FrameArray = np.asarray(cv2.flip(raw_frame, 1), dtype=np.uint8)
                 rgb_frame: FrameArray = np.asarray(
@@ -115,17 +90,13 @@ class PoseControllerApp:
                 )
 
                 serial_client.send(current_cmd)
-                mode_name = available_modes[capture_mode_index][0]
-                mode_names = [mode[0] for mode in available_modes]
                 renderer.render_frame(
                     frame,
                     landmarks,
                     current_cmd,
                     camera_index=camera_index,
-                    capture_mode=mode_name,
                     serial_status=serial_client.status_text,
                     serial_connected=serial_client.is_connected,
-                    available_modes=mode_names,
                 )
 
                 _present_frame(self.config.window_title, frame)
@@ -147,67 +118,15 @@ class PoseControllerApp:
                     next_camera = _next_camera(cameras, camera_index)
                     new_cap = cv2.VideoCapture(next_camera)
                     if new_cap.isOpened():
-                        previous_mode_name = available_modes[capture_mode_index][0]
+                        _configure_capture_resolution(new_cap, next_camera)
                         cap.release()
                         cap = new_cap
                         camera_index = next_camera
-                        original_capture_properties = _get_capture_properties(cap)
-                        cap, available_modes = _discover_capture_modes(
-                            cap, camera_index, original_capture_properties
-                        )
-                        capture_mode_index = 0
-                        matching_index = next(
-                            (
-                                idx
-                                for idx, mode in enumerate(available_modes)
-                                if mode[0] == previous_mode_name
-                            ),
-                            0,
-                        )
-                        if matching_index != 0:
-                            cap, switched = _switch_capture_mode(
-                                cap,
-                                camera_index,
-                                available_modes[matching_index],
-                                original_capture_properties,
-                            )
-                            if switched:
-                                capture_mode_index = matching_index
-                            else:
-                                print(
-                                    "⚠️ Capture mode is unsupported by this camera; "
-                                    "using Auto."
-                                )
+                        resolution_pending = True
                         print(f"Switched to camera {camera_index}.")
                     else:
                         new_cap.release()
                         print(f"⚠️ Could not open camera {next_camera}.")
-                target_mode_index: int | None = None
-                if key in (ord("m"), ord("M")):
-                    target_mode_index = (capture_mode_index + 1) % len(available_modes)
-                elif ord("1") <= key <= ord("9"):
-                    selected_idx = key - ord("1")
-                    if selected_idx < len(available_modes):
-                        target_mode_index = selected_idx
-
-                if (
-                    target_mode_index is not None
-                    and target_mode_index != capture_mode_index
-                ):
-                    next_mode = available_modes[target_mode_index]
-                    cap, switched = _switch_capture_mode(
-                        cap,
-                        camera_index,
-                        next_mode,
-                        original_capture_properties,
-                    )
-                    if switched:
-                        capture_mode_index = target_mode_index
-                        print(f"Capture mode: {next_mode[0]}")
-                    else:
-                        print(
-                            f"⚠️ Camera does not support capture mode {next_mode[0]}."
-                        )
 
 
 def main(config: ControllerConfig | None = None) -> None:
@@ -592,24 +511,38 @@ def _next_camera(cameras: list[int], current_camera: int) -> int:
     return cameras[(cameras.index(current_camera) + 1) % len(cameras)]
 
 
-def _get_capture_properties(
-    camera: cv2.VideoCapture,
-) -> tuple[float, float, float]:
-    """Read width, height, and FPS properties from a VideoCapture safely."""
-    try:
-        return (
-            camera.get(cv2.CAP_PROP_FRAME_WIDTH),
-            camera.get(cv2.CAP_PROP_FRAME_HEIGHT),
-            camera.get(cv2.CAP_PROP_FPS),
+def _configure_capture_resolution(camera: cv2.VideoCapture, camera_index: int) -> None:
+    """Request 720p once without probing modes or changing the camera's FPS."""
+    for prop, value in (
+        (cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH),
+        (cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT),
+    ):
+        try:
+            accepted = camera.set(prop, float(value))
+        except cv2.error as exc:
+            print(f"⚠️ Camera {camera_index}: resolution property {prop} failed: {exc}")
+        else:
+            if not accepted:
+                print(
+                    f"⚠️ Camera {camera_index}: resolution property {prop} "
+                    "was rejected; continuing with the actual resolution."
+                )
+
+
+def _report_capture_resolution(frame: FrameArray, camera_index: int) -> None:
+    """Report the actual resolution from the first ordinary frame of each activation."""
+    height, width = frame.shape[:2]
+    if (width, height) != (CAPTURE_WIDTH, CAPTURE_HEIGHT):
+        print(
+            f"⚠️ Camera {camera_index}: requested {CAPTURE_WIDTH}x{CAPTURE_HEIGHT}, "
+            f"received {width}x{height}; continuing at the actual resolution."
         )
-    except cv2.error:
-        return (0.0, 0.0, 0.0)
+    else:
+        print(f"Camera {camera_index}: {width}x{height}.")
 
 
 def _safe_read_frame(
     camera: cv2.VideoCapture,
-    *,
-    quiet: bool = False,
 ) -> tuple[bool, FrameArray | None]:
     """Read a frame from the camera, catching OpenCV assertion/buffer errors gracefully."""
     try:
@@ -618,134 +551,5 @@ def _safe_read_frame(
             return False, None
         return True, np.asarray(frame, dtype=np.uint8)
     except (cv2.error, OSError, RuntimeError) as exc:
-        if not quiet:
-            print(f"⚠️ OpenCV frame capture error: {exc}")
+        print(f"⚠️ OpenCV frame capture error: {exc}")
         return False, None
-
-
-def _discover_capture_modes(
-    camera: cv2.VideoCapture,
-    camera_index: int,
-    original_properties: tuple[float, float, float],
-) -> tuple[cv2.VideoCapture, list[CaptureMode]]:
-    """Probe and list capture modes supported by the camera, returning a clean Auto stream."""
-    available: list[CaptureMode] = [CAPTURE_MODES[0]]
-    current_cap = camera
-
-    for mode in CAPTURE_MODES[1:]:
-        current_cap, supported = _switch_capture_mode(
-            current_cap, camera_index, mode, original_properties
-        )
-        if supported:
-            available.append(mode)
-
-    current_cap, _ = _switch_capture_mode(
-        current_cap, camera_index, CAPTURE_MODES[0], original_properties
-    )
-
-    print(f"Available capture modes (Camera {camera_index}):")
-    for idx, mode in enumerate(available, start=1):
-        if mode[0] == "Auto" and original_properties[0] > 0 and original_properties[1] > 0:
-            w, h, fps = original_properties
-            fps_str = f" @{int(round(fps))}" if fps > 0 else ""
-            print(f"  {idx}. {mode[0]} ({int(round(w))}x{int(round(h))}{fps_str})")
-        else:
-            print(f"  {idx}. {mode[0]}")
-
-    return current_cap, available
-
-
-def _switch_capture_mode(
-    camera: cv2.VideoCapture,
-    camera_index: int,
-    mode: CaptureMode,
-    original_properties: tuple[float, float, float] | None = None,
-) -> tuple[cv2.VideoCapture, bool]:
-    """Switch capture mode safely, reopening the capture stream if the driver buffer mismatches."""
-    previous_properties = _get_capture_properties(camera)
-    if _apply_capture_mode(camera, mode, original_properties):
-        return camera, True
-
-    # Reopen the camera from scratch so MSMF allocates a fresh buffer stride for the new resolution
-    try:
-        camera.release()
-    except cv2.error:
-        pass
-
-    reopened = cv2.VideoCapture(camera_index)
-    if reopened.isOpened() and _apply_capture_mode(
-        reopened, mode, original_properties
-    ):
-        return reopened, True
-
-    # Restore previous working mode on a clean capture instance
-    try:
-        reopened.release()
-    except cv2.error:
-        pass
-    fallback = cv2.VideoCapture(camera_index)
-    if fallback.isOpened() and previous_properties[0] > 0 and previous_properties[1] > 0:
-        _apply_capture_mode(
-            fallback,
-            ("Auto", None, None, None),
-            previous_properties,
-        )
-    return fallback, False
-
-
-def _apply_capture_mode(
-    camera: cv2.VideoCapture,
-    mode: CaptureMode,
-    original_properties: tuple[float, float, float] | None = None,
-) -> bool:
-    """Apply a resolution/FPS preset and verify with a test frame read."""
-    name, width, height, fps = mode
-    if name == "Auto":
-        if original_properties is None:
-            ret, _ = _safe_read_frame(camera, quiet=True)
-            return ret
-        width_val, height_val, fps_val = original_properties
-    elif width is None or height is None or fps is None:
-        return False
-    else:
-        width_val, height_val, fps_val = float(width), float(height), float(fps)
-
-    previous_properties = _get_capture_properties(camera)
-    try:
-        if width_val > 0 and height_val > 0:
-            camera.set(cv2.CAP_PROP_FRAME_WIDTH, float(width_val))
-            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height_val))
-        if fps_val > 0:
-            camera.set(cv2.CAP_PROP_FPS, float(fps_val))
-    except cv2.error:
-        return False
-
-    test_frame: FrameArray | None = None
-    for _ in range(2):
-        ret, test_frame = _safe_read_frame(camera, quiet=True)
-        if not ret or test_frame is None:
-            return False
-
-    if name == "Auto":
-        return True
-
-    frame_h, frame_w = test_frame.shape[:2]
-    actual_width = camera.get(cv2.CAP_PROP_FRAME_WIDTH)
-    actual_height = camera.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    if (
-        abs(frame_w - float(width_val)) < 1
-        and abs(frame_h - float(height_val)) < 1
-        and abs(actual_width - float(width_val)) < 1
-        and abs(actual_height - float(height_val)) < 1
-    ):
-        return True
-
-    try:
-        if previous_properties[0] > 0 and previous_properties[1] > 0:
-            camera.set(cv2.CAP_PROP_FRAME_WIDTH, previous_properties[0])
-            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, previous_properties[1])
-        if previous_properties[2] > 0:
-            camera.set(cv2.CAP_PROP_FPS, previous_properties[2])
-    except cv2.error:
-        pass
-    return False

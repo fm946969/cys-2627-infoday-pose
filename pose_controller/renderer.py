@@ -37,7 +37,7 @@ class HudRenderer:
         )
 
     def _load_logo(self) -> FrameArray | None:
-        """Load and resize the school logo if available."""
+        """Load and resize the school logo, preserving its alpha channel."""
         logo_path = self._config.resolve_logo_path()
         if not logo_path.is_file():
             print(
@@ -47,9 +47,11 @@ class HudRenderer:
             return None
 
         try:
-            raw_logo = cv2.imread(str(logo_path))
+            raw_logo = cv2.imread(str(logo_path), cv2.IMREAD_UNCHANGED)
             if raw_logo is None:
                 raise ValueError(f"OpenCV could not decode '{logo_path}'.")
+            if raw_logo.ndim == 2:
+                raw_logo = cv2.cvtColor(raw_logo, cv2.COLOR_GRAY2BGR)
             resized_logo: FrameArray = np.asarray(
                 cv2.resize(
                     raw_logo,
@@ -59,7 +61,7 @@ class HudRenderer:
             )
             print(f"✅ Successfully loaded and resized school logo '{logo_path}'.")
             return resized_logo
-        except Exception as exc:
+        except (cv2.error, ValueError) as exc:
             print(
                 f"⚠️ Warning: Could not process logo. Error: {exc}. "
                 "The script will run without the logo."
@@ -81,7 +83,7 @@ class HudRenderer:
         )
 
     def overlay_logo(self, frame: FrameArray) -> None:
-        """Overlay the school logo in the top-left corner of the frame."""
+        """Blend the school logo over the frame using its per-pixel alpha channel."""
         if self._logo is None:
             return
 
@@ -89,7 +91,13 @@ class HudRenderer:
         end_pos = margin + self._config.logo_size
         h, w = frame.shape[:2]
         if h >= end_pos and w >= end_pos:
-            frame[margin:end_pos, margin:end_pos] = self._logo
+            roi = frame[margin:end_pos, margin:end_pos]
+            if self._logo.shape[2] == 4:
+                alpha = self._logo[:, :, 3:4].astype(np.float32) / 255.0
+                blended = self._logo[:, :, :3] * alpha + roi * (1.0 - alpha)
+                roi[:] = np.rint(blended).astype(np.uint8)
+            else:
+                roi[:] = self._logo
 
     def _draw_translucent_box(
         self,
@@ -175,29 +183,13 @@ class HudRenderer:
         self,
         frame: FrameArray,
         camera_index: int,
-        capture_mode: str,
-        available_modes: Sequence[str] = (),
     ) -> None:
-        """Draw compact camera, available modes, and keyboard hints at the bottom-left."""
+        """Draw the camera's actual resolution and keyboard hints at the bottom-left."""
         height, width = frame.shape[:2]
-        status = f"Camera {camera_index} | Mode: {capture_mode}"
-        modes_line = (
-            "Modes: "
-            + "  ".join(
-                f"{idx}:{name.split(' @')[0]}"
-                for idx, name in enumerate(available_modes, start=1)
-            )
-            if available_modes
-            else ""
-        )
-        mode_key_hint = (
-            f"1-{len(available_modes)}/M: mode" if available_modes else "M: mode"
-        )
-        hints = f"C: next camera  {mode_key_hint}  Q: quit"
+        status = f"Camera {camera_index} | Resolution: {width}x{height}"
+        hints = "C: next camera  Q: quit"
 
         lines: list[tuple[str, BGRColor]] = [(status, YELLOW_COLOR)]
-        if modes_line:
-            lines.append((modes_line, (220, 220, 220)))
         lines.append((hints, GREEN_COLOR))
 
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -233,10 +225,8 @@ class HudRenderer:
         landmarks: Sequence[Any] | None,
         command: ControlCommand,
         camera_index: int = 0,
-        capture_mode: str = "Auto",
         serial_status: str = "",
         serial_connected: bool = False,
-        available_modes: Sequence[str] = (),
     ) -> None:
         """Render pose, logo, command HUD, and compact operation hints."""
         if landmarks is not None:
@@ -251,6 +241,4 @@ class HudRenderer:
         self.draw_operation_hints(
             frame,
             camera_index,
-            capture_mode,
-            available_modes=available_modes,
         )
