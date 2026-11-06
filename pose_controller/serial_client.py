@@ -26,6 +26,15 @@ class SerialCommunicator:
         """Return whether a physical serial connection is active."""
         return self._serial is not None and self._serial.is_open
 
+    @property
+    def status_text(self) -> str:
+        """Return a concise human-readable serial connection status for the HUD."""
+        if not self._config.serial_port:
+            return "Test Mode (No COM)"
+        if self.is_connected:
+            return f"{self._config.serial_port} (Connected)"
+        return f"{self._config.serial_port} (Disconnected)"
+
     def connect(self) -> None:
         """Open the micro:bit USB serial port or fall back to No-Hardware Test Mode."""
         if not self._config.serial_port:
